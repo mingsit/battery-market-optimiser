@@ -17,6 +17,7 @@ class BatteryMarketOptimiser():
         self.action_history = []
         self.market_ma = {1: 50, 2: 50}
         self.current_battery = [2, 2]  # assume we have 2 battery half full initially, so that we can go for arbitrage profit first
+        self.battery_cycle = [0.25, 0.25]  # Cycle lifetime used
 
     def calculate_moving_average(self, days=7):
         sum_price = 0
@@ -40,9 +41,9 @@ class BatteryMarketOptimiser():
     
         # Calculate charging cost, If cost > expected gain, return no actions
         cycle_cost = self.param['Capex'] / self.param['Lifetime (2)']  # battery action cost by whole cycle, ignore time cost.
-        charge_eff = self.param['Battery charging efficiency']
-        discharge_eff = self.param['Battery discharging efficiency']
-        total_efficiency = (1 - charge_eff) * (1 - discharge_eff)
+        charge_eff = (1 - self.param['Battery charging efficiency'])
+        discharge_eff = (1 - self.param['Battery discharging efficiency'])
+        total_efficiency = charge_eff * discharge_eff
         battery_size = self.param['Max storage volume']
         charge_rate = self.param['Max charging rate']
         discharge_rate = self.param['Max discharging rate']
@@ -52,31 +53,136 @@ class BatteryMarketOptimiser():
 
         # Calculate Arbitrage gain
         actions = []  # list of dict: {time, action:[charge/discharge], cash=float}
-        cashflow = 0  # positive: receive money by discharging, negative: pay money to charge
-        if not self.market_1_freeze and not not self.market_2_freeze:
+        
+        market_1_price = self.price_history[-1]['market_1_price']
+        market_2_price = self.price_history[-1]['market_2_price']
+        if not self.market_1_freeze and not self.market_2_freeze:
             # Can do actions in both market, find arbitrage opportunity
             if self.current_battery[0] > 0 and self.current_battery[1] > 0 and self.current_battery[0] < battery_size and self.current_battery[1] < battery_size:
                 # Not empty or not full
-                market_1_price = self.price_history[-1]['market_1_price']
-                market_2_price = self.price_history[-1]['market_2_price']
+                # Decide how much rate to charge and discharge so the amoumt is equal
+                if market_1_price < market_2_price:
+                    max_charge_amt = charge_rate * self.market_1_interval
+                    max_discharge_amt = discharge_rate * self.market_2_interval
+                    target_amt = min(max_charge_amt, max_discharge_amt)
+                    target_charge_rate = target_amt / self.market_1_interval
+                    target_discharge_rate = target_amt / self.market_2_interval
+                    charge_market = 1
+                    discharge_market = 2
+                else:
+                    max_charge_amt = charge_rate * self.market_2_interval
+                    max_discharge_amt = discharge_rate * self.market_1_interval
+                    target_amt = min(max_charge_amt, max_discharge_amt)
+                    target_charge_rate = target_amt / self.market_2_interval
+                    target_discharge_rate = target_amt / self.market_1_interval
+                    charge_market = 2
+                    discharge_market = 1
+
                 # Find actual revenue and cost by taking cycle cost and enery loss into account
-                action_cost = cycle_cost / battery_size * (charge_rate + discharge_rate) * min(self.market_1_interval, self.market_2_interval) / 2
-                actual_charge_cost = min(market_1_price, market_2_price) * charge_rate + action_cost
-                actual_revenue = max(market_1_price, market_2_price) * discharge_rate * total_efficiency
-                if actual_revenue > actual_charge_cost:  # revenue > cost means arbitrage profit, do action
+                cycle_cost = cycle_cost / (battery_size * 2) * (target_amt * 2)
+                # shorter market use full rate. longer market use proportional rate
+                charge_cost = min(market_1_price, market_2_price) * target_amt
+                actual_revenue = max(market_1_price, market_2_price) * target_amt * total_efficiency
+                net_profit = actual_revenue - charge_cost - cycle_cost
+                if net_profit > 0:  # Can earn arbitrage profit, do action
                     print(f'Arbitrage opportunity found: Market Price {market_1_price} vs {market_2_price}')
-                    print(f'Net profit for this action: {actual_revenue-actual_charge_cost}')
-                    if self.price_history[-1]['market_1_price'] < self.price_history[-1]['market_2_price']:
-                        actions = ['charge', 'discharge']  # charge from market 1, discharge to market 2
-                    else:
-                        actions = ['discharge', 'charge']
-                    cashflow = actual_revenue - min(market_1_price, market_2_price) * charge_rate
-                    print(f'Gross profit for this action: {cashflow}')
+                    print(f'Gross profit for this action: {actual_revenue-charge_cost}')
+                    print(f'Net profit for this action: {net_profit}')
+                    charge_battery = 1
+                    discharge_battery = 0
+                    if self.current_battery[0] < self.current_battery[1]:
+                        charge_battery = 0
+                        discharge_battery = 1
+                    actions.append({'time': self.current_time, 'battery': charge_battery, 'market': charge_market, 
+                                    'action': 'charge', 'rate': target_charge_rate, 
+                                    'cash': - market_1_price * target_amt})
+                    actions.append({'time': self.current_time, 'battery': discharge_battery, 'market': discharge_market, 
+                                    'action': 'charge', 'rate': target_discharge_rate, 
+                                    'cash': market_2_price * target_amt * total_efficiency})
+                    self.current_battery[charge_battery] += target_amt * charge_eff
+                    self.current_battery[discharge_battery] -= target_amt * charge_eff  # only charge_eff matters
         
-        if use_ma:  # buy low, sell high
+        if use_ma and not actions:  # buy low, sell high
             # Charge if actual_charge_cost < moving average
             # Discharge if actual_revenue < moving average
-            pass
+
+            if self.current_battery[0] < battery_size and self.current_battery[1] < battery_size:
+                # Find whether this is a charge opportunity
+                buy_unit = 0
+                charge_battery = []
+                for i in [0, 1]:
+                    if self.current_battery[i] < battery_size:
+                        buy_unit += 1
+                        charge_battery.append(i)
+                if not self.market_1_freeze and not self.market_2_freeze:
+                    buy_price = min(market_1_price, market_2_price)
+                    compare_price = max(self.market_ma[1], self.market_ma[2])
+                    period = self.market_1_interval if market_1_price < market_2_price else self.market_2_interval
+                    market = 1 if market_1_price < market_2_price else 2
+                elif not self.market_1_freeze:
+                    buy_price = market_1_price
+                    compare_price = self.market_ma[1]
+                    period = self.market_1_interval
+                    market = 1
+                elif not self.market_2_freeze:
+                    buy_price = market_2_price
+                    compare_price = self.market_ma[2]
+                    period = self.market_2_interval
+                    market = 2
+                # Naively assuming we can discharge enerygy later at average price, buy if profit under average price
+                # Always use full power in profit scenario
+                # Calculate cost and profit for EACH battery
+                cycle_cost = cycle_cost / (battery_size * 2) * (charge_rate) * period
+                charge_cost = buy_price * charge_rate * period
+                revenue = compare_price * charge_rate * period * total_efficiency  # use charge_rate here
+                potential_profit = revenue - charge_cost - cycle_cost
+                if potential_profit > 0:  # buy low
+                    print(f'Charge at price {buy_price} in market {market}')
+                    print(f'Cost for this action: {charge_cost * buy_unit}')
+                    for i in charge_battery:
+                        actions.append({'time': self.current_time, 'battery': i, 'market': market, 
+                                        'action': 'charge', 'rate': charge_rate, 
+                                        'cash': - charge_cost})
+                        self.current_battery[i] += charge_rate * charge_eff * period
+
+            if self.current_battery[0] > 0 or self.current_battery[1] > 0:
+                # Find whether this is a discharge opportunity
+                sell_unit = 0
+                discharge_battery = []
+                for i in [0, 1]:
+                    if self.current_battery[i] > 0:
+                        sell_unit += 1
+                        discharge_battery.append(i)
+                if not self.market_1_freeze and not self.market_2_freeze:
+                    sell_price = max(market_1_price, market_2_price)
+                    compare_price = min(self.market_ma[1], self.market_ma[2])
+                    period = self.market_1_interval if market_1_price > market_2_price else self.market_2_interval
+                    market = 1 if market_1_price > market_2_price else 2
+                elif not self.market_1_freeze:
+                    sell_price = market_1_price
+                    compare_price = self.market_ma[1]
+                    period = self.market_1_interval
+                    market = 1
+                elif not self.market_2_freeze:
+                    sell_price = market_2_price
+                    compare_price = self.market_ma[2]
+                    period = self.market_2_interval
+                    market = 2
+                # Naively assuming we can charge enerygy back at average price, sell if profit over average price
+                # Always use full power in profit scenario
+                # Calculate cost and profit for EACH battery
+                cycle_cost = cycle_cost / (battery_size * 2) * (discharge_rate) * period
+                charge_cost = compare_price * discharge_rate * period  # use discharge_rate here
+                actual_revenue = sell_price * discharge_rate * period * total_efficiency
+                potential_profit = actual_revenue - charge_cost - cycle_cost
+                if potential_profit > 0:  # sell high
+                    print(f'Discharge at price {sell_price} in market {market}')
+                    print(f'Revenue for this action: {actual_revenue * sell_unit}')
+                    for i in discharge_battery:
+                        actions.append({'time': self.current_time, 'battery': i, 'market': market, 
+                                        'action': 'discharge', 'rate': discharge_rate, 
+                                        'cash': actual_revenue})
+                        self.current_battery[i] -= discharge_rate * period
 
         # TODO in the future: predict the price in the upcoming hours after having enough data (4-week?)
         # Maybe ARIMA model for time series analysis, then use weekday for regression testing
@@ -84,8 +190,8 @@ class BatteryMarketOptimiser():
         # Then compare predicted price with arbitrage opportunity / moving average, which has better gain
         
         if actions:
-            action_dict = {'time': self.current_time, 'action': actions, 'cash': cashflow}
-            self.action_history.append(action_dict)
+            print(self.current_battery)
+            self.action_history += actions
 
     def simulate(self):
         # Read both market's data into data frame
