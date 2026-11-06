@@ -16,7 +16,7 @@ class BatteryMarketOptimiser():
         # list of dict: {time, is_holiday, market_1_price, market_2_price}
         self.action_history = []
         self.market_ma = {1: 50, 2: 50}
-        self.current_battery = (0, 0)  # assume we have 2 battery initially, so that we can go for arbitrage profit without prediction
+        self.current_battery = [2, 2]  # assume we have 2 battery half full initially, so that we can go for arbitrage profit first
 
     def calculate_moving_average(self, days=7):
         sum_price = 0
@@ -40,13 +40,42 @@ class BatteryMarketOptimiser():
     
         # Calculate charging cost, If cost > expected gain, return no actions
         cycle_cost = self.param['Capex'] / self.param['Lifetime (2)']  # battery action cost by whole cycle, ignore time cost.
-        total_efficiency = (1 - self.param['Battery charging efficiency']) * (1 - self.param['Battery discharging efficiency'])
+        charge_eff = self.param['Battery charging efficiency']
+        discharge_eff = self.param['Battery discharging efficiency']
+        total_efficiency = (1 - charge_eff) * (1 - discharge_eff)
+        battery_size = self.param['Max storage volume']
+        charge_rate = self.param['Max charging rate']
+        discharge_rate = self.param['Max discharging rate']
         
         # Charge efficiency
         # Discharge efficiency
 
         # Calculate Arbitrage gain
-        if use_ma:  # compare arbitrage gain with moving average
+        actions = []  # list of dict: {time, action:[charge/discharge], cash=float}
+        cashflow = 0  # positive: receive money by discharging, negative: pay money to charge
+        if not self.market_1_freeze and not not self.market_2_freeze:
+            # Can do actions in both market, find arbitrage opportunity
+            if self.current_battery[0] > 0 and self.current_battery[1] > 0 and self.current_battery[0] < battery_size and self.current_battery[1] < battery_size:
+                # Not empty or not full
+                market_1_price = self.price_history[-1]['market_1_price']
+                market_2_price = self.price_history[-1]['market_2_price']
+                # Find actual revenue and cost by taking cycle cost and enery loss into account
+                action_cost = cycle_cost / battery_size * (charge_rate + discharge_rate) * min(self.market_1_interval, self.market_2_interval) / 2
+                actual_charge_cost = min(market_1_price, market_2_price) * charge_rate + action_cost
+                actual_revenue = max(market_1_price, market_2_price) * discharge_rate * total_efficiency
+                if actual_revenue > actual_charge_cost:  # revenue > cost means arbitrage profit, do action
+                    print(f'Arbitrage opportunity found: Market Price {market_1_price} vs {market_2_price}')
+                    print(f'Net profit for this action: {actual_revenue-actual_charge_cost}')
+                    if self.price_history[-1]['market_1_price'] < self.price_history[-1]['market_2_price']:
+                        actions = ['charge', 'discharge']  # charge from market 1, discharge to market 2
+                    else:
+                        actions = ['discharge', 'charge']
+                    cashflow = actual_revenue - min(market_1_price, market_2_price) * charge_rate
+                    print(f'Gross profit for this action: {cashflow}')
+        
+        if use_ma:  # buy low, sell high
+            # Charge if actual_charge_cost < moving average
+            # Discharge if actual_revenue < moving average
             pass
 
         # TODO in the future: predict the price in the upcoming hours after having enough data (4-week?)
@@ -54,11 +83,8 @@ class BatteryMarketOptimiser():
         # Further suggestion: also create an API to MetOffice to get current temperature, use ANOVA test for significance
         # Then compare predicted price with arbitrage opportunity / moving average, which has better gain
         
-        # list of dict: {time, action:[charge/discharge], cash=float}
-        actions = []
-        cashflow = 0  # positive: receive money by discharging, negative: pay money to charge
-        action_dict = {'time': self.current_time, 'action': actions, 'cash': cashflow}
         if actions:
+            action_dict = {'time': self.current_time, 'action': actions, 'cash': cashflow}
             self.action_history.append(action_dict)
 
     def simulate(self):
