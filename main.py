@@ -14,6 +14,7 @@ class BatteryMarketOptimiser():
         self.price_history = []  # As we don't know the future, everything should only base on history price
         # list of dict: {time, is_holiday, market_1_price, market_2_price}
         self.action_history = []
+        self.moving_average_days = 7
         self.market_ma = {1: 50, 2: 50}
         self.ma_profit_margin = 0.15  # Minimum profit margin for charging / discharging compared to moving average
         self.current_battery = [2, 2]  # assume we have 2 half-full battery initially, so that we can go for arbitrage profit if any
@@ -34,9 +35,8 @@ class BatteryMarketOptimiser():
     def decide_action(self):
         # Decide to charge / discharge based on arbitrage, moving average or ARIMA prediction
         use_ma = False
-        moving_average_days = 7
-        if self.current_time - timedelta(days=moving_average_days) > self.start_time:
-            self.calculate_moving_average(days=moving_average_days)
+        if self.current_time - timedelta(days=self.moving_average_days) > self.start_time:
+            self.calculate_moving_average(days=self.moving_average_days)
             use_ma = True
     
         # Calculate charging cost, If cost > expected gain, return no actions
@@ -52,7 +52,7 @@ class BatteryMarketOptimiser():
         # Discharge efficiency
 
         # Calculate Arbitrage gain
-        actions = []  # list of dict: {time, action:[charge/discharge], cash=float}
+        actions = []  # list of dict: {time, action:charge/discharge, battery=int, market=int, cash=float}
         
         market_1_price = self.price_history[-1]['market_1_price']
         market_2_price = self.price_history[-1]['market_2_price']
@@ -213,13 +213,15 @@ class BatteryMarketOptimiser():
 
         holiday = {date(2018, 1, 1)}  # Only 1 holiday from 2018-01-01 to 2018-03-01
         # use date().weekday() to find weekday. Both bank holiday and weekday = 5 or 6 defined as holiday
-
+        
         market_1_ind = 0
         market_2_ind = 0
-        self.current_time = datetime(2018, 1, 1)
+        self.current_time = datetime.strptime(df_1['time'][0], '%Y-%m-%d %H:%M:%S')
         self.start_time = self.current_time
-        self.market_1_interval = 0.5  # half hour interval
-        self.market_2_interval = 1  # 1 hour interval
+        diff1 = datetime.strptime(df_1['time'][1], '%Y-%m-%d %H:%M:%S') - datetime.strptime(df_1['time'][0], '%Y-%m-%d %H:%M:%S')
+        diff2 = datetime.strptime(df_2['time'][1], '%Y-%m-%d %H:%M:%S') - datetime.strptime(df_2['time'][0], '%Y-%m-%d %H:%M:%S')
+        self.market_1_interval = diff1.seconds / 3600  # half hour interval
+        self.market_2_interval = diff2.seconds / 3600  # 1 hour interval
         self.market_1_freeze = True
         self.market_2_freeze = True
 
