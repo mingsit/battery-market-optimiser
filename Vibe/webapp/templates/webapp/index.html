@@ -1,0 +1,376 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Battery Arbitrage Dashboard</title>
+  <link rel="icon" type="image/svg+xml" href="{% static 'webapp/favicon.svg' %}">
+  <link rel="stylesheet" href="{% static 'webapp/style.css' %}">
+</head>
+<body>
+  <header class="hero">
+    <div class="wrap hero-inner">
+      <div class="hero-copy">
+        <p class="eyebrow">Two markets · two batteries · half-hourly</p>
+        <h1>Battery Arbitrage Dashboard</h1>
+        <p class="subtitle">
+          Pick a half-hour to see the market history, the 7-day average, the
+          ARIMA forecast, every action taken so far and the next suggested move.
+        </p>
+      </div>
+      <form class="time-form" method="get">
+        <label for="at">View snapshot at</label>
+        <input
+          id="at"
+          type="datetime-local"
+          name="at"
+          value="{{ selected_input }}"
+          min="{{ data_start_input }}"
+          max="{{ data_end_input }}"
+          step="1800"
+        >
+        <button type="submit">View snapshot</button>
+        <p class="form-hint">Data range: {{ data_range_label }}</p>
+      </form>
+    </div>
+  </header>
+
+  <main class="wrap">
+    {% if time_note %}
+    <div class="notice">{{ time_note }}</div>
+    {% endif %}
+
+    <section class="kpi-grid">
+      {% for kpi in kpis %}
+      <article class="kpi {{ kpi.tone }}">
+        <span class="kpi-label">{{ kpi.label }}</span>
+        <strong class="kpi-value">{{ kpi.value }}</strong>
+        <span class="kpi-hint">{{ kpi.hint }}</span>
+      </article>
+      {% endfor %}
+    </section>
+
+    <section class="card chart-card">
+      <div class="card-head">
+        <div>
+          <h2>Price history and forecast</h2>
+          <p>
+            Prices up to {{ selected_label }}. Dashed lines are 7-day averages;
+            dotted lines are the ARIMA path from the selected bar.
+          </p>
+        </div>
+        <ul class="legend">
+          <li><span class="swatch m1"></span>Market 1</li>
+          <li><span class="swatch m2"></span>Market 2</li>
+          <li><span class="swatch ma"></span>7-day average</li>
+          <li><span class="swatch fc"></span>Forecast</li>
+        </ul>
+      </div>
+      <div class="chart-shell">{{ chart_svg|safe }}</div>
+    </section>
+
+    <section class="two-col">
+      <article class="card">
+        <div class="card-head">
+          <h2>Market signals</h2>
+          <span class="muted">Selected bar {{ selected_label }}</span>
+        </div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Market</th>
+              <th>Price</th>
+              <th>Forecast</th>
+              <th>7-day avg</th>
+              <th>Signal</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in market_rows %}
+            <tr>
+              <td>{{ row.name }}</td>
+              <td class="num">{{ row.price }}</td>
+              <td class="num">{{ row.forecast }}</td>
+              <td class="num">
+                {{ row.average }}
+                <span class="sub">{{ row.delta }} vs avg</span>
+              </td>
+              <td>
+                <span class="pill {{ row.tone }}">{{ row.relation }}</span>
+                <small class="table-note">{{ row.detail }}</small>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <details class="history-details">
+          <summary>Recent half-hour prices</summary>
+          <div class="table-scroll history-scroll">
+            <table class="data-table compact">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Market 1</th>
+                  <th>Market 2</th>
+                  <th>MA 1</th>
+                  <th>MA 2</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in recent_prices %}
+                <tr>
+                  <td class="nowrap">{{ row.time }}</td>
+                  <td class="num">{{ row.market_1 }}</td>
+                  <td class="num">{{ row.market_2 }}</td>
+                  <td class="num muted">{{ row.market_1_ma }}</td>
+                  <td class="num muted">{{ row.market_2_ma }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <h2>Battery state</h2>
+          <span class="muted">{{ fleet.cycles }} cycles · {{ fleet.soc_pct }}% full</span>
+        </div>
+        <div class="fleet-strip">
+          <div>
+            <span>Fleet SOC</span>
+            <strong>{{ fleet.soc }} / {{ fleet.capacity }} MWh</strong>
+          </div>
+          <div>
+            <span>Avg. stored cost</span>
+            <strong>{{ fleet.average_cost }}</strong>
+          </div>
+          <div>
+            <span>Rated power</span>
+            <strong>{{ fleet.charge_mw }} / {{ fleet.discharge_mw }} MW</strong>
+          </div>
+        </div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Unit</th>
+              <th>SOC</th>
+              <th>Cycles</th>
+              <th>Avg cost</th>
+              <th>Last action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in battery_rows %}
+            <tr>
+              <td>{{ row.name }}</td>
+              <td class="num">
+                {{ row.soc }} / {{ row.capacity }} MWh
+                <span class="sub">{{ row.soc_pct }}%</span>
+              </td>
+              <td class="num">{{ row.cycles }}</td>
+              <td class="num">{{ row.average_cost }}</td>
+              <td class="small">{{ row.last_action }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </article>
+    </section>
+
+    <section class="two-col">
+      <article class="card suggested-card">
+        <div class="card-head">
+          <h2>Suggested action</h2>
+          <span class="muted">At {{ selected_label }}, before acting</span>
+        </div>
+        {% if suggested.has_action %}
+        <div class="suggested-head">
+          <span class="pill action">{{ suggested.label }}</span>
+          <span class="muted">Expected profit {{ suggested.expected_profit }}</span>
+        </div>
+        <ul class="action-list">
+          {% for item in suggested.items %}
+          <li>
+            <span class="action-badge">{{ item.action }}</span>
+            <strong>{{ item.battery }}</strong>
+            <span>{{ item.energy }} at {{ item.market }} · {{ item.price }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+        <p class="reason">{{ suggested.reason }}</p>
+        {% else %}
+        <div class="empty-state">
+          <strong>{{ suggested.label }}</strong>
+          <p>{{ suggested.reason }}</p>
+        </div>
+        {% endif %}
+        <p class="footnote">
+          The suggestion is for this bar and is not yet included in the
+          realised profit or the action history.
+        </p>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <h2>Profit breakdown</h2>
+          <span class="muted">Before {{ selected_label }}</span>
+        </div>
+        <table class="data-table compact">
+          <tbody>
+            {% for row in profit_rows %}
+            <tr>
+              <td>{{ row.label }}</td>
+              <td class="num">{{ row.value }}</td>
+            </tr>
+            {% endfor %}
+            <tr class="total">
+              <td>Realised profit</td>
+              <td class="num">{{ realised_profit_label }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="footnote">
+          Stored energy is marked at the highest market price at the selected
+          time, net of cycle wear that is deferred until discharge.
+        </p>
+      </article>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <h2>ARIMA forecast</h2>
+          <p>{{ forecast_note }}</p>
+        </div>
+        {% if forecast_available %}
+        <div class="model-meta">
+          {% for item in model.orders %}
+          <span class="pill neutral">{{ item.market }} {{ item.order }}</span>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </div>
+      {% if forecast_available %}
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Step</th>
+            <th>Market 1 forecast</th>
+            <th>Market 2 forecast</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in forecast_rows %}
+          <tr>
+            <td>{{ row.time }}</td>
+            <td class="num">{{ row.market_1 }}</td>
+            <td class="num">{{ row.market_2 }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% if model.metrics %}
+      <div class="metric-row">
+        {% for metric in model.metrics %}
+        <span>
+          {{ metric.market }} MAE <strong>{{ metric.mae }}</strong>
+          · skill vs naive <strong>{{ metric.skill }}</strong>
+        </span>
+        {% endfor %}
+      </div>
+      {% endif %}
+      {% else %}
+      <div class="empty-state">
+        <p>{{ forecast_note }}</p>
+      </div>
+      {% endif %}
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <h2>Previous actions</h2>
+          <p>
+            {{ action_count }} executed interval{{ action_count|pluralize }}
+            before {{ selected_label }}. Newest first.
+          </p>
+        </div>
+      </div>
+      {% if page_obj.object_list %}
+      <div class="table-scroll">
+        <table class="data-table actions-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Action</th>
+              <th>Battery 1</th>
+              <th>Battery 2</th>
+              <th>Cash flow</th>
+              <th>Fleet SOC</th>
+              <th>Cycles</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in page_obj %}
+            <tr>
+              <td class="nowrap">{{ row.time_label }}</td>
+              <td><span class="pill {{ row.tone }}">{{ row.label }}</span></td>
+              <td>
+                {% if row.battery_0_action == '—' %}
+                <span class="muted">—</span>
+                {% else %}
+                <strong>{{ row.battery_0_action }}</strong>
+                {{ row.battery_0_energy|floatformat:2 }} MWh
+                <br><small>{{ row.battery_0_market }} · {{ row.battery_0_price|floatformat:2 }}</small>
+                {% endif %}
+              </td>
+              <td>
+                {% if row.battery_1_action == '—' %}
+                <span class="muted">—</span>
+                {% else %}
+                <strong>{{ row.battery_1_action }}</strong>
+                {{ row.battery_1_energy|floatformat:2 }} MWh
+                <br><small>{{ row.battery_1_market }} · {{ row.battery_1_price|floatformat:2 }}</small>
+                {% endif %}
+              </td>
+              <td class="num">{{ row.cash_flow|floatformat:2 }}</td>
+              <td class="num">{{ row.soc_mwh|floatformat:2 }}</td>
+              <td class="num">{{ row.cycles|floatformat:2 }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="pagination">
+        {% if page_obj.has_previous %}
+        <a href="?at={{ query_at|urlencode }}&page={{ page_obj.previous_page_number }}">← Previous</a>
+        {% else %}
+        <span class="disabled">← Previous</span>
+        {% endif %}
+        <span>Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
+        {% if page_obj.has_next %}
+        <a href="?at={{ query_at|urlencode }}&page={{ page_obj.next_page_number }}">Next →</a>
+        {% else %}
+        <span class="disabled">Next →</span>
+        {% endif %}
+      </div>
+      {% else %}
+      <div class="empty-state">
+        <p>No battery actions have been executed before this time.</p>
+      </div>
+      {% endif %}
+    </section>
+  </main>
+
+  <footer class="wrap footer">
+    <p>
+      Strategy: pure arbitrage during the first four weeks, then the combined
+      ARIMA + arbitrage rule. Before {{ train_end_label }} the forecast is not
+      applicable.
+    </p>
+  </footer>
+</body>
+</html>
