@@ -1,7 +1,6 @@
 import pandas
 import os
 from datetime import datetime, date, timedelta
-from copy import deepcopy
 
 
 class BatteryMarketOptimiser():
@@ -32,7 +31,7 @@ class BatteryMarketOptimiser():
                     break
             self.market_ma[market] = sum_price / count
 
-    def decide_action(self) -> dict:
+    def decide_action(self):
         # Decide to charge / discharge based on arbitrage, moving average or ARIMA prediction
         use_ma = False
         moving_average_days = 7
@@ -203,7 +202,8 @@ class BatteryMarketOptimiser():
         # Then compare predicted price with arbitrage opportunity / moving average, which has better gain
         
         if actions:
-            print(self.current_battery)
+            print('Battery level after action:', self.current_battery)
+            print('====================================')
             self.action_history += actions
 
     def simulate(self):
