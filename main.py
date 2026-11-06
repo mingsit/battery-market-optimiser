@@ -16,8 +16,9 @@ class BatteryMarketOptimiser():
         # list of dict: {time, is_holiday, market_1_price, market_2_price}
         self.action_history = []
         self.market_ma = {1: 50, 2: 50}
-        self.current_battery = [2, 2]  # assume we have 2 battery half full initially, so that we can go for arbitrage profit first
-        self.battery_cycle = [0.25, 0.25]  # Cycle lifetime used
+        self.ma_profit_margin = 0.15  # Minimum profit margin for charging / discharging compared to moving average
+        self.current_battery = [2, 2]  # assume we have 2 half-full battery initially, so that we can go for arbitrage profit if any
+        self.battery_cycle = [0.25, 0.25]  # Cycle lifetime used (0.25 initially)
 
     def calculate_moving_average(self, days=7):
         sum_price = 0
@@ -58,26 +59,23 @@ class BatteryMarketOptimiser():
         market_2_price = self.price_history[-1]['market_2_price']
         if not self.market_1_freeze and not self.market_2_freeze:
             # Can do actions in both market, find arbitrage opportunity
-            if self.current_battery[0] > 0 and self.current_battery[1] > 0 and self.current_battery[0] < battery_size and self.current_battery[1] < battery_size:
-                # Not empty or not full
-                # Decide how much rate to charge and discharge so the amoumt is equal
-                if market_1_price < market_2_price:
-                    max_charge_amt = charge_rate * self.market_1_interval
-                    max_discharge_amt = discharge_rate * self.market_2_interval
-                    target_amt = min(max_charge_amt, max_discharge_amt)
-                    target_charge_rate = target_amt / self.market_1_interval
-                    target_discharge_rate = target_amt / self.market_2_interval
-                    charge_market = 1
-                    discharge_market = 2
-                else:
-                    max_charge_amt = charge_rate * self.market_2_interval
-                    max_discharge_amt = discharge_rate * self.market_1_interval
-                    target_amt = min(max_charge_amt, max_discharge_amt)
-                    target_charge_rate = target_amt / self.market_2_interval
-                    target_discharge_rate = target_amt / self.market_1_interval
-                    charge_market = 2
-                    discharge_market = 1
-
+            # Decide how much rate to charge and discharge so the amoumt is equal
+            if market_1_price < market_2_price:
+                max_charge_amt = charge_rate * self.market_1_interval
+                max_discharge_amt = discharge_rate * self.market_2_interval
+                target_amt = min(max_charge_amt, max_discharge_amt)
+                charge_market = 1
+                discharge_market = 2
+            else:
+                max_charge_amt = charge_rate * self.market_2_interval
+                max_discharge_amt = discharge_rate * self.market_1_interval
+                target_amt = min(max_charge_amt, max_discharge_amt)
+                charge_market = 2
+                discharge_market = 1
+            if self.current_battery[0] > target_amt and self.current_battery[1] > target_amt and \
+                self.current_battery[0] < battery_size - target_amt and self.current_battery[1] < battery_size - target_amt:
+                # TODO improvement: should aggerate to charge / discharge until maximum or 0
+                
                 # Find actual revenue and cost by taking cycle cost and enery loss into account
                 cycle_cost = cycle_cost / (battery_size * 2) * (target_amt * 2)
                 # shorter market use full rate. longer market use proportional rate
@@ -94,13 +92,13 @@ class BatteryMarketOptimiser():
                         charge_battery = 0
                         discharge_battery = 1
                     actions.append({'time': self.current_time, 'battery': charge_battery, 'market': charge_market, 
-                                    'action': 'charge', 'rate': target_charge_rate, 
-                                    'cash': - market_1_price * target_amt})
+                                    'action': 'charge', 'cash': - market_1_price * target_amt})
                     actions.append({'time': self.current_time, 'battery': discharge_battery, 'market': discharge_market, 
-                                    'action': 'charge', 'rate': target_discharge_rate, 
-                                    'cash': market_2_price * target_amt * total_efficiency})
+                                    'action': 'charge', 'cash': market_2_price * target_amt * total_efficiency})
                     self.current_battery[charge_battery] += target_amt * charge_eff
                     self.current_battery[discharge_battery] -= target_amt * charge_eff  # only charge_eff matters
+                    for i in [0, 1]:
+                        self.battery_cycle[i] += target_amt / (battery_size * 2)
         
         if use_ma and not actions:  # buy low, sell high
             # Charge if actual_charge_cost < moving average
@@ -136,14 +134,22 @@ class BatteryMarketOptimiser():
                 charge_cost = buy_price * charge_rate * period
                 revenue = compare_price * charge_rate * period * total_efficiency  # use charge_rate here
                 potential_profit = revenue - charge_cost - cycle_cost
-                if potential_profit > 0:  # buy low
+                if potential_profit > self.ma_profit_margin * charge_cost:  # buy low
                     print(f'Charge at price {buy_price} in market {market}')
                     print(f'Cost for this action: {charge_cost * buy_unit}')
                     for i in charge_battery:
+                        if self.current_battery[i] > battery_size - charge_rate * period * charge_eff:
+                            # If battery hits maximum, just charge to maximum
+                            buy_amount = (battery_size - self.current_battery[i]) / charge_eff
+                            charge_cost = buy_price * buy_amount
+                            self.current_battery[i] = battery_size
+                            self.battery_cycle[i] += (battery_size - self.current_battery[i]) / (battery_size * 2)
+                            print(f'Charged battery to full, only cost {charge_cost} instead')
+                        else:
+                            self.current_battery[i] += charge_rate * charge_eff * period
+                            self.battery_cycle[i] += charge_rate * period / (battery_size * 2)
                         actions.append({'time': self.current_time, 'battery': i, 'market': market, 
-                                        'action': 'charge', 'rate': charge_rate, 
-                                        'cash': - charge_cost})
-                        self.current_battery[i] += charge_rate * charge_eff * period
+                                        'action': 'charge', 'cash': - charge_cost})
 
             if self.current_battery[0] > 0 or self.current_battery[1] > 0:
                 # Find whether this is a discharge opportunity
@@ -172,17 +178,24 @@ class BatteryMarketOptimiser():
                 # Always use full power in profit scenario
                 # Calculate cost and profit for EACH battery
                 cycle_cost = cycle_cost / (battery_size * 2) * (discharge_rate) * period
-                charge_cost = compare_price * discharge_rate * period  # use discharge_rate here
-                actual_revenue = sell_price * discharge_rate * period * total_efficiency
+                charge_cost = (compare_price * discharge_rate * period) / charge_eff
+                actual_revenue = sell_price * discharge_rate * period * discharge_eff
                 potential_profit = actual_revenue - charge_cost - cycle_cost
-                if potential_profit > 0:  # sell high
+                if potential_profit > self.ma_profit_margin * charge_cost:  # sell high
                     print(f'Discharge at price {sell_price} in market {market}')
                     print(f'Revenue for this action: {actual_revenue * sell_unit}')
                     for i in discharge_battery:
+                        if self.current_battery[i] <  discharge_rate * period:
+                            # If battery hits 0, just discharge to 0
+                            actual_revenue = sell_price * self.current_battery[i] * discharge_eff
+                            self.battery_cycle[i] += self.current_battery[i] / (battery_size * 2)
+                            self.current_battery[i] = 0
+                            print(f'Discharged battery to 0, only receive {actual_revenue} instead')
+                        else:
+                            self.current_battery[i] -= discharge_rate * period
+                            self.battery_cycle[i] += discharge_rate * period / (battery_size * 2)
                         actions.append({'time': self.current_time, 'battery': i, 'market': market, 
-                                        'action': 'discharge', 'rate': discharge_rate, 
-                                        'cash': actual_revenue})
-                        self.current_battery[i] -= discharge_rate * period
+                                        'action': 'discharge', 'cash': actual_revenue})
 
         # TODO in the future: predict the price in the upcoming hours after having enough data (4-week?)
         # Maybe ARIMA model for time series analysis, then use weekday for regression testing
@@ -240,6 +253,23 @@ class BatteryMarketOptimiser():
 
             self.decide_action()
 
+    def summary(self):
+        # Output profits and cycle costs
+        cashflow = 0
+        for item in self.action_history:
+            cashflow += item['cash']
+        print('Total Gross Profit (£):', cashflow)
+        # Cycle cost
+        cycle_cost = self.param['Capex'] / self.param['Lifetime (2)'] * sum(self.battery_cycle)
+        print('Cost of battery cycle (£):', cycle_cost)
+        # Battery level
+        print('Total Battery energy left (MWh):', sum(self.current_battery))
+        # Net profit, initally 4 MWh at ~£50
+        net_profit = cashflow - cycle_cost + sum(self.current_battery) * (self.market_ma[1] + self.market_ma[2]) / 2 - 200
+        print('Net Profit (£):', net_profit)
+
     
 if __name__ == "__main__":
-    BatteryMarketOptimiser().simulate()
+    bmo = BatteryMarketOptimiser()
+    bmo.simulate()
+    bmo.summary()
