@@ -11,7 +11,7 @@ In this example, I try to earn profit by mainly 2 strategies:
 6. Having 2 half-filled battery initially.
 7. See Attachment.csv
 ## Dependency
-Only pandas.
+pandas & OR-tools
 ## To run the whole script.
 python main.py
 ## Future ideas

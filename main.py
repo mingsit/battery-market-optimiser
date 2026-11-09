@@ -1,6 +1,7 @@
 import pandas
 import os
 from datetime import datetime, date, timedelta
+from ortools.linear_solver import pywraplp
 
 
 class BatteryMarketOptimiser():
@@ -19,6 +20,9 @@ class BatteryMarketOptimiser():
         self.ma_profit_margin = 0.15  # Minimum profit margin for charging / discharging compared to moving average
         self.current_battery = [2, 2]  # assume we have 2 half-full battery initially, so that we can go for arbitrage profit if any
         self.battery_cycle = [0.25, 0.25]  # Cycle lifetime used (0.25 initially)
+
+        # For OR Tools
+        self.num_battery = 1
 
     def calculate_moving_average(self, days=7):
         sum_price = 0
@@ -270,8 +274,121 @@ class BatteryMarketOptimiser():
         net_profit = cashflow - cycle_cost + sum(self.current_battery) * (self.market_ma[1] + self.market_ma[2]) / 2 - 200
         print('Net Profit (£):', net_profit)
 
+    def use_or_tools(self):
+        ''' Assume we know the future, treat it as a pure optimising problem
+        For simplicity, I only use market 1 '''
+        df = pandas.read_csv(os.path.join('data', 'market_1.csv'), parse_dates=['time'])
+
+        diff1 = df['time'][1] - df['time'][0]
+        self.market_1_interval = diff1.seconds / 3600  # half hour interval
+
+        charge_amt = self.param['Max charging rate'] * self.market_1_interval
+        discharge_amt = self.param['Max discharging rate'] * self.market_1_interval
+        battery_size = self.param['Max storage volume']
+        charge_eff = (1 - self.param['Battery charging efficiency'])
+        discharge_eff = (1 - self.param['Battery discharging efficiency'])
+        cycle_cost = self.param['Capex'] / self.param['Lifetime (2)']
+        cycle_cost_per_mwh = cycle_cost / (battery_size * discharge_eff)
+
+        prices = df.set_index('time')['price'].astype(float)
+        n = len(prices)
+        price = prices.to_numpy()
+        solver = pywraplp.Solver.CreateSolver('CBC')
+        if solver is None:
+            raise RuntimeError('OR-Tools CBC solver is not available.')
     
-if __name__ == "__main__":
+        charge, discharge, soc, charging = {}, {}, {}, {}
+        for battery in range(self.num_battery):
+            for t in range(n):
+                charge[battery, t] = solver.NumVar(0, charge_amt, '')
+                discharge[battery, t] = solver.NumVar(0, discharge_amt, '')
+                soc[battery, t] = solver.NumVar(0, battery_size, '')
+                charging[battery, t] = solver.BoolVar('')
+    
+                # A single battery cannot charge and discharge in the same bar.
+                solver.Add(
+                    charge[battery, t] <= charge_amt * charging[battery, t]
+                )
+                solver.Add(
+                    discharge[battery, t]
+                    <= discharge_amt * (1 - charging[battery, t])
+                )
+    
+                previous_soc = soc[battery, t - 1] if t > 0 else 0.0
+                solver.Add(
+                    soc[battery, t]
+                    == previous_soc
+                    + charge_eff * charge[battery, t]
+                    - discharge[battery, t] / discharge_eff
+                )
+    
+            # End empty so no free energy is left in the battery.
+            solver.Add(soc[battery, n - 1] == 0)
+    
+        revenue = sum(
+            price[t] * discharge[battery, t]
+            for battery in range(self.num_battery)
+            for t in range(n)
+        )
+        purchase = sum(
+            price[t] * charge[battery, t]
+            for battery in range(self.num_battery)
+            for t in range(n)
+        )
+        wear = sum(
+            cycle_cost_per_mwh * discharge[battery, t]
+            for battery in range(self.num_battery)
+            for t in range(n)
+        )
+        solver.Maximize(revenue - purchase - wear)
+    
+        status = solver.Solve()
+        if status != pywraplp.Solver.OPTIMAL:
+            raise RuntimeError(f'Optimisation did not finish optimally: {status}')
+    
+        rows = []
+        for t, timestamp in enumerate(prices.index):
+            rows.append(
+                {
+                    'time': timestamp,
+                    'price': price[t],
+                    'charge_mwh': sum(
+                        charge[battery, t].solution_value()
+                        for battery in range(self.num_battery)
+                    ),
+                    'discharge_mwh': sum(
+                        discharge[battery, t].solution_value()
+                        for battery in range(self.num_battery)
+                    ),
+                    'soc_mwh': sum(
+                        soc[battery, t].solution_value()
+                        for battery in range(self.num_battery)
+                    ),
+                }
+            )
+    
+        summary = pandas.DataFrame(rows).set_index('time')
+        summary['profit'] = (
+            summary['price'] * (summary['discharge_mwh'] - summary['charge_mwh'])
+            - cycle_cost_per_mwh * summary['discharge_mwh']
+        )
+
+        revenue = (summary['price'] * summary['discharge_mwh']).sum()
+        purchase = (summary['price'] * summary['charge_mwh']).sum()
+        wear = cycle_cost_per_mwh * summary['discharge_mwh'].sum()
+        discharged = summary['discharge_mwh'].sum()
+        cycles = (discharged / discharge_eff) / battery_size
+
+        print('For perfect buy/sell scenario (each battery) optimised in market 1:')
+        print(f'Revenue (£): {revenue:,.2f}')
+        print(f'Energy purchase cost (£): {purchase:,.2f}')
+        print(f'Cost of battery cycle (£): {wear:,.2f}')
+        print(f'Net profit (£): {summary["profit"].sum():,.2f}')
+        print(f'Equivalent full cycles: {cycles:,.2f}')
+
+    
+if __name__ == '__main__':
     bmo = BatteryMarketOptimiser()
-    bmo.simulate()
-    bmo.summary()
+    #bmo.simulate()
+    #bmo.summary()
+    bmo.use_or_tools()
