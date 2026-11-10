@@ -379,7 +379,7 @@ class BatteryMarketOptimiser():
         discharged = summary['discharge_mwh'].sum()
         cycles = (discharged / discharge_eff) / battery_size
 
-        print('For perfect buy/sell scenario (each battery) optimised in market 1:')
+        print(f'For perfect buy/sell scenario (battery={self.num_battery}) optimised in market 1:')
         print(f'Revenue (£): {revenue:,.2f}')
         print(f'Energy purchase cost (£): {purchase:,.2f}')
         print(f'Cost of battery cycle (£): {wear:,.2f}')
